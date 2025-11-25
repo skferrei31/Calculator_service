@@ -4,18 +4,30 @@ var request = require('sync-request');
 const PORT = 80;
 const service_ip = '10.10.10.100';
 
-// microservices
+// Calculator microservices
 const SUM_SERVICE_IP_PORT = 'http://' + service_ip + ':31001';
 const SUB_SERVICE_IP_PORT = 'http://' + service_ip + ':31002';
 const MUL_SERVICE_IP_PORT = 'http://' + service_ip + ':31003';
 const DIV_SERVICE_IP_PORT = 'http://' + service_ip + ':31004';
 
 // FastAPI metrics endpoint
-const METRICS_SERVICE = 'http://10.10.10.230:50060/measures';
+const METRICS_SERVICE = 'http://127.0.0.1:50060/measures';
+
+// Names for operations
+function getOperationName(op) {
+    switch (op) {
+        case '+': return 'Sum';
+        case '-': return 'Subtraction';
+        case '*': return 'Multiplication';
+        case '/': return 'Division';
+        default: return 'Operation';
+    }
+}
 
 String.prototype.isNumeric = function () {
     return !isNaN(parseFloat(this)) && isFinite(this);
 }
+
 Array.prototype.clean = function () {
     for (var i = 0; i < this.length; i++) {
         if (this[i] === "") {
@@ -25,6 +37,7 @@ Array.prototype.clean = function () {
     }
     return this;
 }
+
 function infixToPostfix(exp) {
     var outputQueue = [];
     var operatorStack = [];
@@ -64,7 +77,7 @@ function infixToPostfix(exp) {
     return outputQueue;
 }
 
-// Measure one remote operation and return result + timing
+// Perform remote microservice operation + measure duration
 function doOperation(a, b, operator) {
     var reqBody = a + " " + b;
     var service_host;
@@ -78,7 +91,7 @@ function doOperation(a, b, operator) {
     const start = process.hrtime.bigint();
     var resp = request('POST', service_host, { body: reqBody });
     const end = process.hrtime.bigint();
-    const durationMs = Number(end - start) / 1e6; // ms
+    const durationMs = Number(end - start) / 1e6;
 
     var res = parseFloat(resp.getBody());
 
@@ -87,27 +100,27 @@ function doOperation(a, b, operator) {
         durationMs: durationMs,
         operator: operator,
         a: a,
-        b: b
+        b: b,
+        name: getOperationName(operator)
     };
 }
 
-// Returns result + timings + total duration
+// Evaluate postfix expression + compute timings
 function evaluatePostfix(tokens) {
     var stack = [];
     var timings = [];
     tokens.forEach(function (tk) {
         switch (tk) {
-            case "*":
-            case "/":
             case "+":
             case "-":
+            case "*":
+            case "/":
                 var y = parseFloat(stack.pop());
                 var x = parseFloat(stack.pop());
                 var opRes = doOperation(x, y, tk);
                 stack.push(opRes.result);
                 timings.push(opRes);
                 break;
-
             default:
                 stack.push(tk);
                 break;
@@ -115,10 +128,7 @@ function evaluatePostfix(tokens) {
     });
 
     var result = stack.pop();
-    var totalDurationMs = timings.reduce(
-        (sum, op) => sum + op.durationMs,
-        0
-    );
+    var totalDurationMs = timings.reduce((sum, op) => sum + op.durationMs, 0);
 
     return {
         result: result,
@@ -127,7 +137,7 @@ function evaluatePostfix(tokens) {
     };
 }
 
-// Send measures to FastAPI (ignore errors so it doesn't break the calculator)
+// Send metrics to FastAPI
 function sendMeasuresToFastAPI(expression, evalRes) {
     var payload = {
         expression: expression,
@@ -138,14 +148,15 @@ function sendMeasuresToFastAPI(expression, evalRes) {
 
     try {
         request('POST', METRICS_SERVICE, {
-            json: payload,             // sync-request will set headers + stringify
-            timeout: 2000              // ms (optional)
+            json: payload,
+            timeout: 2000
         });
     } catch (e) {
         console.error("Failed to send measures to FastAPI:", e.message);
     }
 }
 
+// HTTP server
 console.log("Listening on port : " + PORT);
 http.createServer(function (req, resp) {
     let body = [];
@@ -164,23 +175,22 @@ http.createServer(function (req, resp) {
 
                 console.log("New request : ");
                 console.log(body + " = " + res);
-                timings.forEach((op, idx) => {
+
+                timings.forEach((op) => {
                     console.log(
-                        `Op ${idx + 1}: ${op.a} ${op.operator} ${op.b} = ${op.result} ` +
-                        `(${op.durationMs.toFixed(3)} ms)`
+                        `${op.name}: ${op.a} ${op.operator} ${op.b} = ${op.result} (${op.durationMs.toFixed(3)} ms)`
                     );
                 });
+
                 console.log("\r\n");
 
-                // Send to FastAPI
                 sendMeasuresToFastAPI(body, evalRes);
 
                 resp.write("result = " + res + "\r\n");
                 resp.write("operations timings:\r\n");
-                timings.forEach((op, idx) => {
+                timings.forEach((op) => {
                     resp.write(
-                        `op${idx + 1}: ${op.a} ${op.operator} ${op.b} = ${op.result} ` +
-                        `(${op.durationMs.toFixed(3)} ms)\r\n`
+                        `${op.name}: ${op.a} ${op.operator} ${op.b} = ${op.result} (${op.durationMs.toFixed(3)} ms)\r\n`
                     );
                 });
             }
